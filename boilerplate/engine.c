@@ -14,7 +14,6 @@
  *   - producer/consumer behavior for log buffering
  *   - signal handling and graceful shutdown
  */
-
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -25,9 +24,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "monitor_ioctl.h"
 
 #define STACK_SIZE (1024 * 1024)
 #define CONTAINER_ID_LEN 32
@@ -51,6 +53,33 @@ typedef struct {
 } bounded_buffer_t;
 
 bounded_buffer_t log_buffer;
+
+/* ================= MONITOR REGISTER ================= */
+
+void register_with_monitor(const char *id, pid_t pid)
+{
+    int fd = open("/dev/container_monitor", O_RDWR);
+    if (fd < 0) {
+        perror("open monitor device");
+        return;
+    }
+
+    struct monitor_request req;
+    memset(&req, 0, sizeof(req));
+
+    req.pid = pid;
+    strncpy(req.container_id, id, sizeof(req.container_id) - 1);
+
+    /* ✅ FINAL WORKING LIMITS */
+    req.soft_limit_bytes = 100 * 1024 * 1024;   // 100 MB
+    req.hard_limit_bytes = 200 * 1024 * 1024;   // 200 MB
+
+    if (ioctl(fd, MONITOR_REGISTER, &req) < 0) {
+        perror("ioctl failed");
+    }
+
+    close(fd);
+}
 
 /* ================= BUFFER ================= */
 
@@ -139,7 +168,7 @@ int child_fn(void *arg)
     return 1;
 }
 
-/* ================= SIMPLE RUN ================= */
+/* ================= RUN CONTAINER ================= */
 
 int run_container(const char *id, const char *command)
 {
@@ -152,7 +181,18 @@ int run_container(const char *id, const char *command)
     cfg.pipe_fd = pipefd[1];
 
     char *stack = malloc(STACK_SIZE);
+
     pid_t pid = clone(child_fn, stack + STACK_SIZE, SIGCHLD, &cfg);
+
+    if (pid < 0) {
+        perror("clone failed");
+        return -1;
+    }
+
+    printf("[engine] Started container %s (pid=%d)\n", id, pid);
+
+    /* 🔥 REGISTER WITH KERNEL MODULE */
+    register_with_monitor(id, pid);
 
     close(pipefd[1]);
 
@@ -171,6 +211,8 @@ int run_container(const char *id, const char *command)
     waitpid(pid, NULL, 0);
     close(pipefd[0]);
 
+    printf("[engine] Container %s finished\n", id);
+
     return 0;
 }
 
@@ -178,13 +220,13 @@ int run_container(const char *id, const char *command)
 
 int main(int argc, char *argv[])
 {
-    if (argc < 3) {
-        printf("Usage: %s run <id> <command>\n", argv[0]);
+    if (argc < 4) {
+        printf("Usage: %s run <id> \"<command>\"\n", argv[0]);
         return 1;
     }
 
     if (strcmp(argv[1], "run") != 0) {
-        printf("Only 'run' supported in this version\n");
+        printf("Only 'run' supported\n");
         return 1;
     }
 
@@ -208,6 +250,3 @@ int main(int argc, char *argv[])
     printf("Execution complete. Logs saved in /logs folder\n");
     return 0;
 }
-
-        
-      
